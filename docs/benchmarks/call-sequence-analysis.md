@@ -389,29 +389,38 @@ node scripts/agent-eval/parse-arms.mjs
 
 ---
 
-# Current-build with/without A/B (excalidraw, 2026-05-24)
+# Current-build with/without A/B — the 7 README repos (2026-05-24)
 
-After this session's changes (self-sufficient trace + explore-flow + line numbers), a fresh
-with-vs-without A/B on excalidraw — same flow question, **n=3 per arm** (headless: codegraph-only MCP
-vs empty MCP):
+Re-ran the published README benchmark on the **current build** (all 7 repos freshly reindexed),
+same queries, **median of 4 runs/arm** (headless: codegraph-only MCP vs empty MCP):
 
-| metric | with codegraph | without | delta |
-|---|--:|--:|--:|
-| duration | 49s [43–53] | 145s [88–184] | **3.0× faster** |
-| total tool calls | 3.3 [3–4] | 49.3 [20–85] | 15× fewer |
-| Reads | 0.3 [0–1] | 23.3 [9–39] | ~0 vs 23 |
-| Grep/Glob | 0.0 | 14.3 [11–21] | eliminated |
-| codegraph calls | 3.0 | 0 | the trade |
-| tokens in | 120k [105–149] | 181k [78–384] | −34% |
-| tokens out | 5.9k | 8.8k | −33% |
-| **cost** | **$0.405** | **$0.678** | **−40%** |
+| repo | time with→without | tools w→wo | tokens w→wo (saved) | cost w→wo (saved) |
+|---|---|--:|--:|--:|
+| vscode | 1m10s→2m26s | 8→55 | 601k→2.8M (78%) | $0.60→$0.80 (26%) |
+| excalidraw | 48s→2m58s | 3→79 | 344k→3.5M (90%) | $0.43→$0.90 (52%) |
+| django | 1m19s→1m38s | 9→19 | 739k→1.2M (36%) | $0.59→$0.67 (12%) |
+| tokio | 53s→3m2s | 4→53 | 379k→2.6M (86%) | $0.42→$2.41 (82%) |
+| okhttp | 42s→1m1s | 6→11 | 636k→730k (13%) | $0.47→$0.47 (2%) |
+| gin | 44s→1m0s | 6→10 | 444k→675k (34%) | $0.37→$0.47 (21%) |
+| alamofire | 1m17s→2m27s | 12→69 | 1.0M→2.8M (64%) | $0.61→$1.14 (47%) |
 
-**Cost is neutral-to-lower, NOT flat** — correcting the earlier "cost stays ~flat" framing. Every one
-of the 3 without-runs cost more than every with-run. Mechanism = caching: compact codegraph answers
-(3 calls) cache well across turns, while the without-arm's 23 reads + 14 greps create fresh,
-poorly-cacheable input that's re-paid each turn. The without-arm also has large tail variance
-(88–184s, 20–85 tools, up to 384k tokens) that codegraph removes. n=3 — the direction is unambiguous
-(with beat without on every metric in every pair); treat magnitudes as a range.
+**Average saved: 35% cost · 57% tokens · 46% time · 71% tool calls** — reproduces the published
+README headline (35% / 59% / 49% / 70%); the current build holds the benchmark with no regression.
 
-Reproduce: `AGENT_EVAL_OUT=<dir> scripts/agent-eval/run-all.sh <repo> "<Q>" headless` per run;
-`scripts/agent-eval/parse-run.mjs <jsonl>` for per-run reads/tools/tokens/cost.
+**Cost is lower, not "flat"** (corrects the earlier note). But the **mechanism is volume, not
+cache-ability**: codegraph answers in far fewer turns over a much smaller accumulated context, while
+the without-arm fans out across many more turns (55–79 tool calls on the big repos), each
+re-processing a large, growing context. The without-arm's token volume is *mostly* cheap cache-reads,
+which is why **token-count savings (57%) look bigger than cost savings (35%)**. Per-repo margin tracks
+how hard the without-arm thrashes that run (tokio blew up to $2.41/3m; django thrashed less).
+
+**Measurement gotcha:** `result.usage` in this Claude Code version is the **last turn only**, not
+cumulative — using it under-counts tokens badly (an earlier excalidraw cut reported "−34% tokens"
+off this bug; the real figure is ~90%). Sum **per-turn assistant `usage`** for the true total.
+`total_cost_usd` and `duration_ms` are already cumulative/correct.
+
+Reproduce:
+```bash
+bash scripts/agent-eval/bench-readme.sh      # 7 repos × with/without × 4 runs (RUNS=4) → /tmp/ab-readme
+node scripts/agent-eval/parse-bench-readme.mjs   # medians + % saved (summed per-turn tokens)
+```
