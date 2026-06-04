@@ -85,15 +85,46 @@ export function sameLanguageFamily(a: string, b: string): boolean {
   return fa !== undefined && fa === LANGUAGE_FAMILY[b];
 }
 /**
- * Drop cross-family candidates for a `references` (type-usage) edge. A type used
- * in language X — a field/param/return type, a `Type.member` static read — names
- * a same-family type, never a coincidentally same-named symbol in another
- * language (the Android `BatteryManager` system class vs a JS `BatteryManager`).
- * Cross-language communication is modeled by `calls` bridges, not `references`.
+ * True when `lang` belongs to a known multi-language family (jvm/apple/web/c).
+ * Languages not listed (php, python, go, ruby, rust, dart, …) and config
+ * formats (yaml/xml/blade) form their own singleton families and return
+ * `false` — used to leave config↔code framework bridges (whose config side is
+ * never a known programming-language family) out of the cross-family gate.
+ */
+export function isKnownLanguageFamily(lang: string): boolean {
+  return LANGUAGE_FAMILY[lang] !== undefined;
+}
+/**
+ * True when `a` and `b` are two DIFFERENT *known* language families — the
+ * signature of a coincidental cross-language name collision (a TS `import
+ * React` matching a Swift `import React`, a C++ `#include "X.h"` matching a
+ * same-named ObjC header on another platform). The both-*known* test is
+ * deliberately weaker than {@link sameLanguageFamily}'s negation: a
+ * single-file-component language that carries its own tag (`vue`/`svelte`)
+ * importing a `.ts` module, or any singleton-family language (php/go/ruby/…),
+ * returns `false` here and is left alone.
+ */
+export function crossesKnownFamily(a: string, b: string): boolean {
+  return isKnownLanguageFamily(a) && isKnownLanguageFamily(b) && !sameLanguageFamily(a, b);
+}
+/**
+ * Drop cross-language candidates from a name lookup. Two regimes:
+ *  - `references` (type-usage): a type named in language X resolves to a
+ *    SAME-family type, never a coincidentally same-named symbol in another
+ *    language (the Android `BatteryManager` system class vs a JS one). Strict
+ *    same-family filter — cross-language communication is `calls`, not refs.
+ *  - `imports` (import binding): an `import`/`#include` never crosses two
+ *    KNOWN families (TS `import React` ↮ Swift `import React`). Weaker
+ *    both-known filter so `.vue`/`.svelte` (own tag) importing `.ts` survives.
  */
 function applyLanguageGate(candidates: Node[], ref: UnresolvedRef): Node[] {
-  if (ref.referenceKind !== 'references') return candidates;
-  return candidates.filter((c) => sameLanguageFamily(c.language, ref.language));
+  if (ref.referenceKind === 'references') {
+    return candidates.filter((c) => sameLanguageFamily(c.language, ref.language));
+  }
+  if (ref.referenceKind === 'imports') {
+    return candidates.filter((c) => !crossesKnownFamily(c.language, ref.language));
+  }
+  return candidates;
 }
 
 /**

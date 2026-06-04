@@ -16,7 +16,7 @@ import {
   FrameworkResolver,
   ImportMapping,
 } from './types';
-import { matchReference, sameLanguageFamily } from './name-matcher';
+import { matchReference, sameLanguageFamily, crossesKnownFamily } from './name-matcher';
 import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
@@ -622,11 +622,13 @@ export class ReferenceResolver {
 
     const candidates: ResolvedRef[] = [];
 
-    // Strategy 1: Try framework-specific resolution. NOT language-gated:
-    // framework resolvers deliberately bridge config↔code across languages
-    // (Drupal `routing.yml` → PHP controller, Spring `@Value` → YAML key).
+    // Strategy 1: Try framework-specific resolution. Cross-language bridges
+    // are deliberately preserved (Drupal `routing.yml` → PHP controller, RN
+    // JS → native `calls`) — `gateFrameworkLanguage` only drops a type/import
+    // edge between two KNOWN families (see its doc), never a `calls` bridge or
+    // a config↔code edge.
     for (const framework of this.frameworks) {
-      const result = framework.resolve(ref, this.context);
+      const result = this.gateFrameworkLanguage(framework.resolve(ref, this.context), ref);
       if (result) {
         if (result.confidence >= 0.9) return result; // High confidence, return immediately
         candidates.push(result);
@@ -951,15 +953,44 @@ export class ReferenceResolver {
   }
 
   /**
-   * Drop a resolution that crosses a language family when the reference is
-   * `sameLanguageOnly` (a `Type.member` static read names a same-family type,
-   * never a coincidentally same-named symbol in another language). Covers ALL
-   * strategies (framework / import / name-match) at one chokepoint.
+   * Drop an import/name-strategy resolution that crosses a language family.
+   * Two regimes (mirrors `applyLanguageGate`'s candidate filter):
+   *  - `references` (type usage): STRICT — a `Type.member` static read names a
+   *    same-family type, never a coincidentally same-named symbol in another
+   *    language. Drops any non-same-family target.
+   *  - `imports` (import binding / `#include`): both-known — a C++ `#include
+   *    "X.h"` must not resolve to a same-named ObjC header on another platform
+   *    (basename collision), but a singleton-family / SFC language (`vue` →
+   *    `.ts`) importing across is left alone.
+   * Applies to the import (strategy 2) + name-match (strategy 3) results.
    */
   private gateLanguage(result: ResolvedRef | null, ref: UnresolvedRef): ResolvedRef | null {
-    if (!result || ref.referenceKind !== 'references') return result;
+    if (!result) return result;
     const tgt = this.getLanguageFromNodeId(result.targetNodeId);
-    if (tgt && ref.language && !sameLanguageFamily(tgt, ref.language)) return null;
+    if (!tgt || !ref.language) return result;
+    if (ref.referenceKind === 'references' && !sameLanguageFamily(tgt, ref.language)) return null;
+    if (ref.referenceKind === 'imports' && crossesKnownFamily(tgt, ref.language)) return null;
+    return result;
+  }
+
+  /**
+   * Drop a FRAMEWORK-strategy resolution that crosses two *known* language
+   * families for a type-usage (`references`) or import-binding (`imports`)
+   * edge. The framework strategy is intentionally ungated for cross-language
+   * bridges, but those legitimate bridges are either `calls` edges (RN/Expo
+   * JS → native) or config↔code edges whose config side (`yaml`/`blade`/…) is
+   * not a known programming-language family. A `references`/`imports` edge
+   * between two *known* families is always a coincidental name collision — the
+   * React/Svelte/Vue PascalCase component resolvers name-match `getNodesByName`
+   * without a language check, so a TS `<TestRunner>` ref happily matched a
+   * Kotlin `class TestRunner`. Gating only the both-known-cross-family case
+   * lets config bridges and `calls` bridges through untouched.
+   */
+  private gateFrameworkLanguage(result: ResolvedRef | null, ref: UnresolvedRef): ResolvedRef | null {
+    if (!result) return result;
+    if (ref.referenceKind !== 'references' && ref.referenceKind !== 'imports') return result;
+    const tgt = this.getLanguageFromNodeId(result.targetNodeId);
+    if (tgt && ref.language && crossesKnownFamily(tgt, ref.language)) return null;
     return result;
   }
 }
