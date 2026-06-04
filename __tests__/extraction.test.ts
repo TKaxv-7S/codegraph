@@ -4005,6 +4005,26 @@ describe('Razor / Blazor markup extraction', () => {
     const htmlNodes = cg.getNodesByKind('class').filter((n) => n.name === 'div' || n.name === 'input');
     expect(htmlNodes.length, 'no node for HTML elements').toBe(0);
   });
+
+  it('delegates Blazor @code block C# to cover types used in component logic', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'CatalogService.cs'),
+      `namespace App { public class CatalogService { public void Load() { } } }`
+    );
+    fs.writeFileSync(
+      path.join(tempDir, 'List.razor'),
+      `<h1>Catalog</h1>\n\n@code {\n  private CatalogService _svc = new CatalogService();\n  void Refresh() { _svc.Load(); }\n}\n`
+    );
+
+    cg = CodeGraph.initSync(tempDir);
+    await cg.indexAll();
+    cg.resolveReferences();
+
+    const svc = cg.getNodesByKind('class').find((n) => n.name === 'CatalogService');
+    expect(svc, 'CatalogService class').toBeDefined();
+    const deps = [...cg.getImpactRadius(svc!.id, 2).nodes.values()].map((n) => n.filePath ?? '');
+    expect(deps.some((p) => p.endsWith('List.razor')), '@code usage links the component to the service').toBe(true);
+  });
 });
 
 describe('Default import resolution (renamed default export)', () => {

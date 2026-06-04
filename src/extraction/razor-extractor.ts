@@ -1,5 +1,7 @@
-import { Node, ExtractionResult, ExtractionError, UnresolvedReference } from '../types';
+import { Node, Edge, ExtractionResult, ExtractionError, UnresolvedReference } from '../types';
 import { generateNodeId } from './tree-sitter-helpers';
+import { TreeSitterExtractor } from './tree-sitter';
+import { isLanguageSupported } from './grammars';
 
 /**
  * RazorExtractor — extracts code relationships from ASP.NET Razor (`.cshtml`)
@@ -49,6 +51,7 @@ export class RazorExtractor {
   private filePath: string;
   private source: string;
   private nodes: Node[] = [];
+  private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
   private errors: ExtractionError[] = [];
 
@@ -67,6 +70,11 @@ export class RazorExtractor {
       if (this.filePath.toLowerCase().endsWith('.razor')) {
         this.extractComponentTags(componentId);
       }
+      // Delegate the C# in `@code { }` / `@functions { }` / `@{ }` blocks to the
+      // C# tree-sitter extractor (the Blazor analog of Svelte's <script> block) —
+      // this is where component logic uses services/DTOs, so it covers the types
+      // referenced only from component code.
+      this.processCodeBlocks(componentId);
     } catch (error) {
       this.errors.push({
         message: `Razor extraction error: ${error instanceof Error ? error.message : String(error)}`,
@@ -76,7 +84,7 @@ export class RazorExtractor {
     }
     return {
       nodes: this.nodes,
-      edges: [],
+      edges: this.edges,
       unresolvedReferences: this.unresolvedReferences,
       errors: this.errors,
       durationMs: Date.now() - startTime,
@@ -172,6 +180,100 @@ export class RazorExtractor {
           const seg = this.lastSegment(t[1]!);
           if (/^[A-Z]/.test(seg)) this.pushRef(componentId, seg, i + 1, 0);
         }
+      }
+    }
+  }
+
+  /**
+   * Find the matching `}` for the `{` at `openIdx`, skipping string literals and
+   * comments so a brace inside `"{"` / `// }` doesn't throw off the count.
+   * Returns the index of the closing brace, or -1 if unbalanced.
+   */
+  private matchBrace(src: string, openIdx: number): number {
+    let depth = 0;
+    for (let i = openIdx; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < src.length && src[i] !== quote) {
+          if (src[i] === '\\') i++;
+          i++;
+        }
+        continue;
+      }
+      if (ch === '/' && src[i + 1] === '/') {
+        while (i < src.length && src[i] !== '\n') i++;
+        continue;
+      }
+      if (ch === '/' && src[i + 1] === '*') {
+        i += 2;
+        while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+        i++;
+        continue;
+      }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  /** `@code { … }` / `@functions { … }` (Blazor) and `@{ … }` (Razor) C# blocks. */
+  private extractCodeBlocks(): Array<{ content: string; lineOffset: number }> {
+    const blocks: Array<{ content: string; lineOffset: number }> = [];
+    const re = /@(?:code|functions)\b\s*\{|@\{/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(this.source)) !== null) {
+      const openIdx = this.source.indexOf('{', m.index);
+      if (openIdx < 0) continue;
+      const close = this.matchBrace(this.source, openIdx);
+      if (close < 0) continue;
+      const content = this.source.slice(openIdx + 1, close);
+      // newlines before the content's first char → 0-indexed line of content start
+      const lineOffset = (this.source.slice(0, openIdx + 1).match(/\n/g) || []).length;
+      blocks.push({ content, lineOffset });
+      re.lastIndex = close;
+    }
+    return blocks;
+  }
+
+  /**
+   * Delegate each `@code`/`@functions`/`@{` block's C# to the tree-sitter C#
+   * extractor and attribute the block's external references (service/DTO calls,
+   * `new X()`, type uses) to the component. The block is wrapped in a synthetic
+   * class so tree-sitter parses the component's fields/methods in a class context
+   * (a Blazor `@code` body compiles into the component's partial class). We keep
+   * only the dependency references — coverage just needs the edges to external
+   * types, not per-member nodes. Degrades gracefully if the C# grammar isn't loaded.
+   */
+  private processCodeBlocks(componentId: string): void {
+    if (!isLanguageSupported('csharp')) return;
+    for (const block of this.extractCodeBlocks()) {
+      if (!block.content.trim()) continue;
+      let result: ExtractionResult;
+      try {
+        result = new TreeSitterExtractor(
+          this.filePath,
+          `class __RazorCode__ {\n${block.content}\n}`,
+          'csharp'
+        ).extract();
+      } catch {
+        continue; // grammar not loaded / parse failure — skip this block
+      }
+      // The synthetic wrapper adds one line before the block content; map ref
+      // lines back to the .razor file (display only — coverage is line-agnostic).
+      for (const ref of result.unresolvedReferences) {
+        this.unresolvedReferences.push({
+          ...ref,
+          fromNodeId: componentId,
+          line: ref.line + block.lineOffset - 1,
+          column: ref.column,
+          filePath: this.filePath,
+          language: 'razor',
+        });
       }
     }
   }
