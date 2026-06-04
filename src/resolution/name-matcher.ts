@@ -15,7 +15,13 @@ export function matchByFilePath(
   ref: UnresolvedRef,
   context: ResolutionContext
 ): ResolvedRef | null {
-  if (!ref.referenceName.includes('/')) return null;
+  // Path-like (`a/b.liquid`) OR a bare filename ending in a short extension
+  // (`Foo.h` — an Objective-C `#import "Foo.h"`, resolved to the header by
+  // basename). A bare ref WITHOUT an extension is a symbol name, not a file, so
+  // leave it to the symbol-matching strategies.
+  if (!ref.referenceName.includes('/') && !/\.[A-Za-z][A-Za-z0-9]{0,3}$/.test(ref.referenceName)) {
+    return null;
+  }
 
   // Extract the filename from the path
   const fileName = ref.referenceName.split('/').pop();
@@ -357,8 +363,11 @@ export function matchMethodCall(
   ref: UnresolvedRef,
   context: ResolutionContext
 ): ResolvedRef | null {
-  // Parse method call patterns like "obj.method" or "Class::method"
-  const dotMatch = ref.referenceName.match(/^(\w+)\.(\w+)$/);
+  // Parse method call patterns like "obj.method" or "Class::method". The method
+  // part allows trailing `:` keywords so Objective-C selectors resolve
+  // (`SDImageCache.storeImage:`, `obj.setX:y:`); colons never appear in other
+  // languages' method refs, so this is a no-op for them.
+  const dotMatch = ref.referenceName.match(/^(\w+)\.(\w+:?(?:\w+:)*)$/);
   const colonMatch = ref.referenceName.match(/^(\w+)::(\w+)$/);
 
   const match = dotMatch || colonMatch;

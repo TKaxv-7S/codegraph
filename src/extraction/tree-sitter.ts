@@ -2247,16 +2247,41 @@ export class TreeSitterExtractor {
         }
       }
       if (methodKeywords.length > 0) {
-        const methodName: string =
-          methodKeywords.length === 1
-            ? (methodKeywords[0] as string)
-            : methodKeywords.map((k) => `${k}:`).join('');
+        // A selector keyword takes a `:` when it has an argument. A SINGLE
+        // keyword can be unary (`[c reset]` → `reset`) OR take one argument
+        // (`[c storeImage:k]` → `storeImage:`) — distinguished by whether the
+        // message has a `:` token. Without this, every single-argument message
+        // (the most common form: `addObject:`, `storeImage:`, …) was named
+        // without the colon and never matched its `storeImage:` method.
+        let hasColon = false;
+        for (let i = 0; i < node.childCount; i++) {
+          if (node.child(i)?.type === ':') { hasColon = true; break; }
+        }
+        const methodName: string = hasColon
+          ? methodKeywords.map((k) => `${k}:`).join('')
+          : (methodKeywords[0] as string);
         const receiverField = getChildByField(node, 'receiver');
         const SKIP_RECEIVERS = new Set(['self', 'super']);
         if (receiverField && receiverField.type !== 'message_expression') {
           const receiverName = getNodeText(receiverField, this.source);
           if (receiverName && !SKIP_RECEIVERS.has(receiverName)) {
             calleeName = `${receiverName}.${methodName}`;
+            // A CLASS-message receiver (`[SDImageCache alloc]`,
+            // `[SDImageCache sharedCache]`) is a capitalized class name. The
+            // call resolves the method (`alloc`/`sharedCache`), but the CLASS
+            // itself — whose @interface lives in the header — would otherwise
+            // never be referenced. Emit a `references` edge to it so a class
+            // used only via class messages (alloc/init, singletons, factories)
+            // and its header record a dependent.
+            if (/^[A-Z][A-Za-z0-9_]*$/.test(receiverName)) {
+              this.unresolvedReferences.push({
+                fromNodeId: callerId,
+                referenceName: receiverName,
+                referenceKind: 'references',
+                line: receiverField.startPosition.row + 1,
+                column: receiverField.startPosition.column,
+              });
+            }
           } else {
             calleeName = methodName;
           }
