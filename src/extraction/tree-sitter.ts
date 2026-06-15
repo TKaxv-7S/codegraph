@@ -224,7 +224,7 @@ export class TreeSitterExtractor {
   // Value-reference edges (default ON; set CODEGRAPH_VALUE_REFS=0 to disable; see flushValueRefs).
   // Same-file reads of file-scope const/var symbols → `references` edges so impact analysis catches
   // value consumers ("change this constant/table, affect its readers").
-  private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx']);
+  private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx', 'go']);
   private static readonly MAX_VALUE_REF_NODES = 20_000;
   private readonly valueRefsEnabled = process.env.CODEGRAPH_VALUE_REFS !== '0';
   private fileScopeValues = new Map<string, string>();
@@ -557,26 +557,41 @@ export class TreeSitterExtractor {
     if (targets.size === 0 || scopes.length === 0 || isGeneratedFile(this.filePath)) return;
 
     // Prune SHADOWED targets. A name bound more than once in the file (e.g. a
-    // bundled/Emscripten `const Module` re-declared as an inner `var Module` /
-    // function param) resolves to the INNER binding for nested readers, so a
-    // file-scope edge to it is a false positive. Those inner re-declarations
-    // aren't extracted as graph nodes, so detect them at the syntax level:
-    // count `variable_declarator` names across the tree and drop any target
-    // bound twice or more. Single-binding (unambiguous) names are kept. This
-    // complements the path-based isGeneratedFile() check for content-minified
-    // bundles it can't catch by suffix.
+    // bundled/Emscripten `const Module` re-declared as an inner `var Module`, or
+    // a Go package `const Timeout` shadowed by a local `Timeout := …`) may
+    // resolve to the INNER binding for nested readers, so a file-scope edge to
+    // it is a false positive. Those inner re-declarations aren't extracted as
+    // graph nodes, so detect them at the syntax level: count every declarator
+    // name across the tree and drop any target bound twice or more. Single-
+    // binding (unambiguous) names are kept. Complements the path-based
+    // isGeneratedFile() check, which can't catch content-minified bundles.
+    //
+    // Declarator node types are per-grammar; a file only contains its own
+    // language's nodes, so matching all of them in one switch is safe.
     if (this.tree) {
       const declCounts = new Map<string, number>();
+      const bump = (nameNode: SyntaxNode | null) => {
+        if (nameNode && nameNode.type === 'identifier') {
+          const nm = getNodeText(nameNode, this.source);
+          if (targets.has(nm)) declCounts.set(nm, (declCounts.get(nm) ?? 0) + 1);
+        }
+      };
       const dstack: SyntaxNode[] = [this.tree.rootNode];
       let dvisited = 0;
       while (dstack.length > 0 && dvisited < TreeSitterExtractor.MAX_VALUE_REF_NODES) {
         const n = dstack.pop()!;
         dvisited++;
-        if (n.type === 'variable_declarator') {
-          const nameNode = n.namedChild(0);
-          if (nameNode && nameNode.type === 'identifier') {
-            const nm = getNodeText(nameNode, this.source);
-            if (targets.has(nm)) declCounts.set(nm, (declCounts.get(nm) ?? 0) + 1);
+        switch (n.type) {
+          case 'variable_declarator': // TS/JS/tsx
+          case 'const_spec':          // Go  `const X = …`
+          case 'var_spec':            // Go  `var X = …`
+            bump(n.namedChild(0));
+            break;
+          case 'short_var_declaration': { // Go  `x, Y := …`
+            const left = getChildByField(n, 'left') ?? n.namedChild(0);
+            if (left?.type === 'identifier') bump(left);
+            else if (left) for (const c of left.namedChildren) bump(c);
+            break;
           }
         }
         for (let i = 0; i < n.namedChildCount; i++) {

@@ -66,11 +66,13 @@ targets** (see §3).
 
 ## 2. Current state (what's shipped + validated)
 
-- **Default ON** for TS/JS/tsx (`CODEGRAPH_VALUE_REFS=0` disables). Shipped in **PR #895**
-  (flip-on + the shadow prune).
-- **Validated S/M/L** in **TypeScript, JavaScript, and tsx** — **PR #897** (the design doc +
-  matrix). All clean: node count identical on/off, precision guards held, impact win
-  reproduced. No FP class beyond excalidraw's bundled-file shadowing (fixed by the prune).
+- **Default ON** for TS/JS/tsx + Go (`CODEGRAPH_VALUE_REFS=0` disables). Shipped in **PR #895**
+  (flip-on + the shadow prune); Go added in a later PR (the shadow-prune declarator switch +
+  `VALUE_REF_LANGS`).
+- **Validated S/M/L** in **TypeScript, JavaScript, tsx, and Go** — see the matrix in the
+  design doc. All clean: node count identical on/off, precision guards held, impact win
+  reproduced. Go required extending the shadow prune (per-grammar declarators) — the worked
+  example of "step B is load-bearing."
 - **Tests:** `__tests__/value-reference-edges.test.ts` — same-file readers edged; surfaced in
   impact radius; shadowed const NOT edged (verified to fail without the guard); JSX-only read
   edged (tsx); `CODEGRAPH_VALUE_REFS=0` emits nothing.
@@ -206,22 +208,32 @@ value-refs captures **file/module-scope** `const`/`var` (target gate requires pa
 
 ### B. Confirm the declarator node type (for the shadow prune)
 
-The shadow prune scans for `variable_declarator`. **Verify the tree-sitter node type for the
-new grammar** and update the scan if different. Starting points **to verify against the actual
-grammar** (don't trust this table — confirm by parsing a sample, e.g. with a probe or
-`tree-sitter parse`):
+The shadow prune (in `flushValueRefs`) counts declarator names via a `switch (n.type)` over
+declarator node types — a file only has its own grammar's nodes, so it's safe to list all
+languages' types in one switch. **Add the new grammar's declarator types there**, with the
+right way to pull the bound name(s). **Verify against the actual grammar** (don't trust this
+table — confirm by parsing a sample). **This step is load-bearing:** if you skip it, the prune
+silently does nothing for the new language and intra-file shadowing produces false positives
+(this is exactly what happened on the first Go pass — see §5-Go below).
 
-| Language | likely declarator node | notes |
-|---|---|---|
-| TS/JS/tsx | `variable_declarator` | done |
-| Python | `assignment` (module-level `NAME = …`) | SCREAMING_CASE fits the distinctive gate |
-| Go | `const_spec` / `var_spec` | inside `const_declaration`/`var_declaration` |
-| Rust | `const_item` / `static_item` | `let_declaration` is locals |
-| Ruby | `assignment` with constant LHS | Ruby CONSTs are `CONST` |
-| C/C++ | `init_declarator` in a file-scope `declaration` | |
+| Language | declarator node(s) | name extraction | status |
+|---|---|---|---|
+| TS/JS/tsx | `variable_declarator` | `namedChild(0)` | done |
+| Go | `const_spec`, `var_spec`, `short_var_declaration` | spec → `namedChild(0)`; short-var → identifiers in the `left` field | **done** |
+| Python | `assignment` (module-level `NAME = …`) | LHS identifier(s) | to verify |
+| Rust | `const_item` / `static_item` (`let_declaration` = locals) | `name` field | to verify |
+| Ruby | `assignment` with constant LHS (`CONST`) | LHS | to verify |
+| C/C++ | `init_declarator` in a file-scope `declaration` | declarator id | to verify |
 
-If the new grammar's declarator differs, generalise the prune (e.g. a small per-language set
-of declarator node types) rather than hard-coding one.
+**Go was the worked example of "step B matters":** the first pass added `go` to
+`VALUE_REF_LANGS` only, and a synthetic probe immediately showed a false positive —
+`func withShadow() { TimeoutSeconds := 5; return TimeoutSeconds }` got edged to the package
+`const TimeoutSeconds`, because the prune scanned `variable_declarator` (which Go doesn't
+have). Fix: add Go's `const_spec`/`var_spec`/`short_var_declaration` to the switch. Note the
+**precision-first tradeoff** this inherits from TS/JS — a shadowed target is dropped for the
+*whole file*, so a legit reader elsewhere in that file loses its edge too. On the Go sweep
+(gin/hugo/prometheus) this over-pruning was negligible (guard invariant clean, no LEAKs), so
+it wasn't worth per-reader analysis — but re-check it per language.
 
 ### C. Confirm what kind the extractor assigns
 

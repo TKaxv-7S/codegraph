@@ -117,6 +117,50 @@ describe('value-reference edges', () => {
     expect(valueRefReaders(cg, 'THEME_TOKENS')).toEqual(expect.arrayContaining(['Label', 'Box']));
   });
 
+  it('edges same-file readers to a package-level const/var (Go)', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'main.go'),
+      [
+        'package main',
+        '',
+        'const MaxRetries = 3',
+        'var DefaultLabels = map[string]string{"env": "prod"}',
+        '',
+        'func retry() int { return MaxRetries }',
+        'func labels() map[string]string { return DefaultLabels }',
+      ].join('\n'),
+    );
+    cg = index();
+    await cg.indexAll();
+
+    expect(valueRefReaders(cg, 'MaxRetries')).toEqual(expect.arrayContaining(['retry']));
+    expect(valueRefReaders(cg, 'DefaultLabels')).toEqual(expect.arrayContaining(['labels']));
+  });
+
+  it('does NOT edge a Go package const shadowed by a local := of the same name', async () => {
+    // `Timeout` is a package const AND a local `:=` (short_var_declaration) in
+    // shadows(). The local read resolves to the inner binding, so a file-scope
+    // edge would be a false positive — the shadow prune drops the whole target.
+    fs.writeFileSync(
+      path.join(dir, 'shadow.go'),
+      [
+        'package main',
+        '',
+        'const Timeout = 30',
+        '',
+        'func usesConst() int { return Timeout }',
+        'func shadows() int {',
+        '\tTimeout := 5',
+        '\treturn Timeout',
+        '}',
+      ].join('\n'),
+    );
+    cg = index();
+    await cg.indexAll();
+
+    expect(valueRefReaders(cg, 'Timeout')).toEqual([]);
+  });
+
   it('emits nothing when CODEGRAPH_VALUE_REFS=0', async () => {
     const prev = process.env.CODEGRAPH_VALUE_REFS;
     process.env.CODEGRAPH_VALUE_REFS = '0';

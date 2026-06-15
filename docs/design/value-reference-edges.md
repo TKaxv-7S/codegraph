@@ -1,6 +1,6 @@
 # Design + status: same-file value-reference edges
 
-**Status:** SHIPPED (default-on for TS/JS; `CODEGRAPH_VALUE_REFS=0` disables). The
+**Status:** SHIPPED (default-on for TS/JS/tsx + Go; `CODEGRAPH_VALUE_REFS=0` disables). The
 emitter lives in `TreeSitterExtractor.flushValueRefs` (`src/extraction/tree-sitter.ts`).
 **Motivation:** close the impact-analysis hole for *value consumers*. Static
 extraction edges calls, imports, and inheritance, but never edges a constant to the
@@ -13,7 +13,7 @@ readers" class of change (the ReScript-PR false positive that motivated the work
 ## TL;DR for a new session
 
 We emit a `references` edge (`metadata: { valueRef: true }`) from a reader symbol to
-the **file-scope `const`/`var` it reads**, same-file only, for TS/JS/TSX. Those edges
+the **file/package-scope `const`/`var` it reads**, same-file only, for TS/JS/tsx + Go. Those edges
 flow straight into `getImpactRadius` / `codegraph impact` and the impact trail in
 `codegraph_explore` / `codegraph_node` — no agent-behaviour change required.
 
@@ -41,7 +41,7 @@ The win is **impact-radius correctness**, not agent read-reduction (see "Agent A
    the content-minified bundles guard #1 misses.
 3. **Distinctive-name + same-file** as above.
 
-## Validation matrix — TypeScript/JavaScript
+## Validation matrix — TypeScript / JavaScript / Go
 
 Method per repo: index the same tree twice (value-refs on vs `CODEGRAPH_VALUE_REFS=0`),
 diff node/edge counts, spot-check precision, and measure `codegraph impact` on a few
@@ -63,10 +63,27 @@ file-scope consts. Node count must be **identical** on/off (edges-only feature).
 | eslint/eslint | medium | 1,420 | 7,167 (stable) | +1,192 (4.2%) | all sampled TP; guard holds; no minified-file FPs | `internalSlotsMap` 1→**32**, `INDEX_MAP` 1→27 |
 | webpack/webpack | large | 9,371 | 28,922 (stable) | +3,521 (4.8%) | all sampled TP; guard holds; no minified-file FPs | `LogType` 1→**89**, `LOG_SYMBOL` 1→90, `UsageState` 2→52 |
 
-Across S/M/L on both languages: node count never moved, the precision guards held, and the
-`impact` OFF column is the bug — a const that 85–90 symbols read reports "1 affected"
-without value-refs. The only false positives ever seen were excalidraw's 23 (one bundled
-file, fixed by the shadow prune); no new FP class surfaced in JS.
+**Go** (package-level `const`/`var`; required extending the shadow prune — see below)
+
+| Repo | size | files | nodes (on=off) | +value-ref edges | precision | `impact` on→off example |
+|---|---|---|---|---|---|---|
+| gin-gonic/gin | small | 110 | 2,599 (stable) | +166 (1.9%) | all sampled TP; guard holds | `abortIndex` 1→**24**, `jsonContentType` 1→8 |
+| gohugoio/hugo | medium | 952 | 19,160 (stable) | +1,616 (2.5%) | all sampled TP; guard holds | `filepathSeparator` 2→**26** |
+| prometheus/prometheus | large | 1,329 | 23,322 (stable) | +3,466 (3.3%) | all sampled TP; guard holds | `rdsLabelInstance` 1→**82**, `ec2Label` 1→24 |
+| kubernetes/kubernetes | very large | 19,160 | 251,086 (stable) | +20,574 (1.9%) | all sampled TP; guard holds on 250 targets | `KubeletSubsystem` 3→**138**, `LEVEL_0` 1→102 |
+
+Across S/M/L in all three languages: node count never moved, the precision guards held, and
+the `impact` OFF column is the bug — a const that 80–90 symbols read reports "1 affected"
+without value-refs.
+
+**Go required a code change** (unlike JS/tsx, which the existing guards covered unchanged).
+Go puts its constants at package = file scope (good — the target gate fits), but its
+declarators are `const_spec`/`var_spec`/`short_var_declaration`, not `variable_declarator`, so
+the shadow prune was a no-op for Go and a package `const Timeout` shadowed by a local
+`Timeout := …` produced a false positive. Extending the prune's declarator switch to Go's node
+types fixed it (one synthetic repro, then clean across gin/hugo/prometheus). This is the
+template for the next language: **the shadow prune is per-grammar and must be wired per
+language** (see the playbook).
 
 **`tsx` is covered by the TS rows** — excalidraw is a React/.tsx codebase, so the headline
 `tablerIconProps` (1→170) and most of its targets live in `.tsx` files. The one
