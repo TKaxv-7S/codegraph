@@ -45,7 +45,7 @@ agent read-reduction (see §4.3).
 
 | Symbol | Role |
 |---|---|
-| `VALUE_REF_LANGS` (static Set) | languages the feature runs for. Currently `typescript`, `javascript`, `tsx`, `go`, `python`. **Add the new language here.** |
+| `VALUE_REF_LANGS` (static Set) | languages the feature runs for. Currently `typescript`, `javascript`, `tsx`, `go`, `python`, `rust`. **Add the new language here.** |
 | `valueRefsEnabled` | `process.env.CODEGRAPH_VALUE_REFS !== '0'` — default ON, env opts out. |
 | `MAX_VALUE_REF_NODES` (20_000) | per-scope traversal cap (and the shadow-scan cap). |
 | `captureValueRefScope(kind, name, id, node)` | called from `createNode` on every node. Records **targets** (file-scope `const`/`var`) and **reader scopes** (`function`/`method`/`const`/`var`). |
@@ -66,10 +66,10 @@ targets** (see §3).
 
 ## 2. Current state (what's shipped + validated)
 
-- **Default ON** for TS/JS/tsx + Go + Python (`CODEGRAPH_VALUE_REFS=0` disables). Shipped in **PR #895**
+- **Default ON** for TS/JS/tsx + Go + Python + Rust (`CODEGRAPH_VALUE_REFS=0` disables). Shipped in **PR #895**
   (flip-on + the shadow prune); Go added in a later PR (the shadow-prune declarator switch +
   `VALUE_REF_LANGS`).
-- **Validated S/M/L** in **TypeScript, JavaScript, tsx, Go, and Python** — see the matrix in the
+- **Validated S/M/L** in **TypeScript, JavaScript, tsx, Go, Python, and Rust** — see the matrix in the
   design doc. All clean: node count identical on/off, precision guards held, impact win
   reproduced. Go required extending the shadow prune (per-grammar declarators) — the worked
   example of "step B is load-bearing."
@@ -222,7 +222,7 @@ silently does nothing for the new language and intra-file shadowing produces fal
 | TS/JS/tsx | `variable_declarator` | `namedChild(0)` | done |
 | Go | `const_spec`, `var_spec`, `short_var_declaration` | spec → `namedChild(0)`; short-var → identifiers in the `left` field | **done** |
 | Python | `assignment` | `left` field: identifier, or iterate a `pattern_list`/`tuple_pattern` | **done** |
-| Rust | `const_item` / `static_item` (`let_declaration` = locals) | `name` field | to verify |
+| Rust | `const_item`, `static_item`, `let_declaration` | const/static → `name` field; let → `pattern` field | **done** |
 | Ruby | `assignment` with constant LHS (`CONST`) | LHS | to verify |
 | C/C++ | `init_declarator` in a file-scope `declaration` | declarator id | to verify |
 

@@ -224,7 +224,7 @@ export class TreeSitterExtractor {
   // Value-reference edges (default ON; set CODEGRAPH_VALUE_REFS=0 to disable; see flushValueRefs).
   // Same-file reads of file-scope const/var symbols → `references` edges so impact analysis catches
   // value consumers ("change this constant/table, affect its readers").
-  private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx', 'go', 'python']);
+  private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx', 'go', 'python', 'rust']);
   private static readonly MAX_VALUE_REF_NODES = 20_000;
   private readonly valueRefsEnabled = process.env.CODEGRAPH_VALUE_REFS !== '0';
   private fileScopeValues = new Map<string, string>();
@@ -600,9 +600,14 @@ export class TreeSitterExtractor {
           case 'var_spec':            // Go  `var X = …`
             bump(n.namedChild(0));
             break;
-          case 'short_var_declaration': // Go  `x, Y := …`
-          case 'assignment': {          // Python  `X = …` / `X: T = …` / `A, B = …`
-            const left = getChildByField(n, 'left') ?? n.namedChild(0);
+          case 'const_item':          // Rust  `const X: T = …`
+          case 'static_item':         // Rust  `static X: T = …`
+            bump(getChildByField(n, 'name'));
+            break;
+          case 'let_declaration':       // Rust  `let x = …` (locals — the shadow source)
+          case 'short_var_declaration': // Go    `x, Y := …`
+          case 'assignment': {          // Python `X = …` / `X: T = …` / `A, B = …`
+            const left = getChildByField(n, 'left') ?? getChildByField(n, 'pattern') ?? n.namedChild(0);
             if (left?.type === 'identifier') bump(left);
             else if (left) for (const c of left.namedChildren) bump(c);
             break;

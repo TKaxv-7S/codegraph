@@ -1,6 +1,6 @@
 # Design + status: same-file value-reference edges
 
-**Status:** SHIPPED (default-on for TS/JS/tsx + Go + Python; `CODEGRAPH_VALUE_REFS=0` disables). The
+**Status:** SHIPPED (default-on for TS/JS/tsx + Go + Python + Rust; `CODEGRAPH_VALUE_REFS=0` disables). The
 emitter lives in `TreeSitterExtractor.flushValueRefs` (`src/extraction/tree-sitter.ts`).
 **Motivation:** close the impact-analysis hole for *value consumers*. Static
 extraction edges calls, imports, and inheritance, but never edges a constant to the
@@ -13,7 +13,7 @@ readers" class of change (the ReScript-PR false positive that motivated the work
 ## TL;DR for a new session
 
 We emit a `references` edge (`metadata: { valueRef: true }`) from a reader symbol to
-the **file/package-scope `const`/`var` it reads**, same-file only, for TS/JS/tsx + Go + Python. Those edges
+the **file/package-scope `const`/`var` it reads**, same-file only, for TS/JS/tsx + Go + Python + Rust. Those edges
 flow straight into `getImpactRadius` / `codegraph impact` and the impact trail in
 `codegraph_explore` / `codegraph_node` — no agent-behaviour change required.
 
@@ -39,13 +39,14 @@ The win is **impact-radius correctness**, not agent read-reduction (see "Agent A
    or a Python module const shadowed by a local `=` all resolve to the inner binding for nested
    readers — a file-scope edge would be a false positive. Inner re-bindings aren't graph nodes,
    so declarators are counted at the syntax level (per-grammar node types: `variable_declarator`
-   for TS/JS, `const_spec`/`var_spec`/`short_var_declaration` for Go, `assignment` for Python).
+   for TS/JS, `const_spec`/`var_spec`/`short_var_declaration` for Go, `assignment` for Python,
+   `const_item`/`static_item`/`let_declaration` for Rust).
    Comparing against file-scope node count (not a flat ">1") keeps **conditional module defs**
    (`try: X=…; except: X=…`), which legitimately bind a name twice at file scope. This catches
    the content-minified bundles guard #1 misses.
 3. **Distinctive-name + same-file** as above.
 
-## Validation matrix — TypeScript / JavaScript / Go / Python
+## Validation matrix — TypeScript / JavaScript / Go / Python / Rust
 
 Method per repo: index the same tree twice (value-refs on vs `CODEGRAPH_VALUE_REFS=0`),
 diff node/edge counts, spot-check precision, and measure `codegraph impact` on a few
@@ -84,7 +85,15 @@ file-scope consts. Node count must be **identical** on/off (edges-only feature).
 | sqlalchemy/sqlalchemy | medium | 679 | 59,963 (stable) | +1,929 (0.8%) | all sampled TP; guard holds | `COMPARE_FAILED` 1→**26**, `DB_LINK_PLACEHOLDER` 1→19 |
 | django/django | large | 3,005 | 61,748 (stable) | +1,328 (0.7%) | all sampled TP; guard holds | `_trans` 1→**138**, `SEARCH_VAR` 4→8 |
 
-Across S/M/L in all four languages: node count never moved, the precision guards held, and
+**Rust** (module-level `const`/`static`; declarators added, no rule change needed)
+
+| Repo | size | files | nodes (on=off) | +value-ref edges | precision | `impact` on→off example |
+|---|---|---|---|---|---|---|
+| BurntSushi/ripgrep | small | 107 | 3,731 (stable) | +144 (0.9%) | all sampled TP; guard holds | `SHERLOCK` 7→**113** |
+| tokio-rs/tokio | medium | 795 | 13,281 (stable) | +476 (1.1%) | all sampled TP; `#[cfg]`-conditional consts kept | `PERMIT_SHIFT` 1→**97**, `LOCAL_QUEUE_CAPACITY` 2→46 |
+| rust-lang/rust-analyzer | large | 1,530 | 38,780 (stable) | +475 (0.25%) | all sampled TP; 0 real shadow leaks | `INLINE_CAP` 2→**183**, `SPAN_PARTS_BIT` 2→18 |
+
+Across S/M/L in all five languages: node count never moved, the precision guards held, and
 the `impact` OFF column is the bug — a const that 80–140 symbols read reports "1 affected"
 without value-refs.
 
@@ -107,6 +116,15 @@ name has: a conditional def makes them equal (both bindings are file-scope), a l
 makes declarators exceed file-scope nodes (the excess is the local). This is strictly more
 correct for *all* languages. (It also made the two halves of a conditional def cross-reference
 via their own names, so same-name value-ref edges are now suppressed.)
+
+**Rust needed only declarators — the rule was already right.** Rust's are `const_item` /
+`static_item` (module consts) and `let_declaration` (the local that shadows). Adding them to
+the switch fixed the expected shadow FP (a `const TIMEOUT` shadowed by a local `let TIMEOUT`).
+Rust also has the conditional-def pattern — `#[cfg(unix)] const SEP = …; #[cfg(windows)] const
+SEP = …` — and the Python-era file-scope-count rule already keeps those correctly (validated on
+tokio's `io/interest.rs` cfg-gated flags). One nice property fell out: consts written inside a
+config macro (`cfg_aio! { … }`) live in an unparsed token tree, so the prune's syntax walk
+doesn't even see them.
 
 **`tsx` is covered by the TS rows** — excalidraw is a React/.tsx codebase, so the headline
 `tablerIconProps` (1→170) and most of its targets live in `.tsx` files. The one

@@ -124,6 +124,43 @@ describe('value-reference edges', () => {
     expect(valueRefReaders(cg, 'THEME_TOKENS')).toEqual(expect.arrayContaining(['Label', 'Box']));
   });
 
+  it('edges same-file readers to a module-level const/static (Rust)', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'lib.rs'),
+      [
+        'const MAX_RETRIES: u32 = 3;',
+        'static DEFAULT_LABEL: &str = "prod";',
+        '',
+        'fn retry() -> u32 { MAX_RETRIES }',
+        "fn label() -> &'static str { DEFAULT_LABEL }",
+      ].join('\n'),
+    );
+    cg = index();
+    await cg.indexAll();
+
+    expect(valueRefReaders(cg, 'MAX_RETRIES')).toEqual(expect.arrayContaining(['retry']));
+    expect(valueRefReaders(cg, 'DEFAULT_LABEL')).toEqual(expect.arrayContaining(['label']));
+  });
+
+  it('does NOT edge a Rust const shadowed by a local let of the same name', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'shadow.rs'),
+      [
+        'const TIMEOUT: u32 = 30;',
+        '',
+        'fn uses_const() -> u32 { TIMEOUT }',
+        'fn shadows() -> u32 {',
+        '    let TIMEOUT = 5;',
+        '    TIMEOUT',
+        '}',
+      ].join('\n'),
+    );
+    cg = index();
+    await cg.indexAll();
+
+    expect(valueRefReaders(cg, 'TIMEOUT')).toEqual([]);
+  });
+
   it('edges same-file readers to a package-level const/var (Go)', async () => {
     fs.writeFileSync(
       path.join(dir, 'main.go'),
