@@ -17,7 +17,7 @@ import {
   ImportMapping,
 } from './types';
 import { matchReference, matchFunctionRef, matchDottedCallChain, matchScopedCallChain, sameLanguageFamily, crossesKnownFamily } from './name-matcher';
-import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef } from './import-resolver';
+import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
@@ -747,11 +747,14 @@ export class ReferenceResolver {
     // ArkTS chained-attribute refs carry a leading dot (`.titleStyle`) that
     // routes them to the decorator-gated matcher; the symbol itself is
     // indexed under the bare name, so the existence check strips the dot.
+    // Nix static path imports (`import ./x.nix`) name a FILE, not a symbol —
+    // they bypass the symbol-existence check and resolve via resolveViaImport.
     const existenceName =
       ref.language === 'arkts' && ref.referenceName.startsWith('.')
         ? ref.referenceName.slice(1)
         : ref.referenceName;
     if (
+      !isNixPathImportRef(ref) &&
       !this.hasAnyPossibleMatch(existenceName) &&
       !this.matchesAnyImport(ref) &&
       !this.frameworks.some((f) => f.claimsReference?.(ref.referenceName))
@@ -826,7 +829,9 @@ export class ReferenceResolver {
     // framework resolver IS the whole rulebook (`var.X` can never legally
     // bind outside its module directory), so the name-matcher's
     // qualified-name fallback would only ever add wrong cross-module edges.
-    if (isPhpIncludePathRef(ref) || isCobolCopybookRef(ref) || ref.language === 'terraform') {
+    // Nix static path imports are file references for the same reason —
+    // falling through would let "./x.nix" name-match an unrelated node.
+    if (isPhpIncludePathRef(ref) || isCobolCopybookRef(ref) || isNixPathImportRef(ref) || ref.language === 'terraform') {
       return candidates.length > 0
         ? candidates.reduce((best, curr) =>
             curr.confidence > best.confidence ? curr : best
